@@ -23,15 +23,22 @@ echo "@@ packages"
 dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}|${source:Package}\n' \
     | awk -F'|' '$1 ~ /^ii/ {sub(/ .*/, "", $4); print $2, $3, ($4 == "" ? $2 : $4)}' | sort
 
+# Start-up warnings stay in the module listings (a new warning is a
+# difference); php-fpm's "[dd-Mon-yyyy hh:mm:ss] " log prefix is dropped so
+# two runs compare equal.
+strip_fpm_time() {
+    sed 's/^\[[0-9][0-9]-[A-Za-z][a-z][a-z]-[0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] //'
+}
+
 echo "@@ version"
-"$php_cli" -v 2>&1 | head -n 1
-"$php_fpm" -v 2>&1 | head -n 1
+"$php_cli" -v 2>/dev/null | head -n 1
+"$php_fpm" -v 2>/dev/null | head -n 1
 
 echo "@@ modules-cli"
 "$php_cli" -m 2>&1
 
 echo "@@ modules-fpm"
-"$php_fpm" -m 2>&1
+"$php_fpm" -m 2>&1 | strip_fpm_time
 
 case "$web_prepare" in
     '') ;;
@@ -71,6 +78,19 @@ done
 echo "@@ php-config-files"
 php_conf_dir=/etc/php/${php_source#php}
 find "$php_conf_dir" \( -type f -o -type l \) -print 2>/dev/null | sort | while IFS= read -r path; do
+    if [ -L "$path" ]; then
+        echo "link $(readlink "$path") $path"
+    else
+        echo "file $(sha256sum < "$path" | cut -c1-64) $path"
+    fi
+done
+
+echo "@@ web-config-files"
+case "$web_server" in
+    apache2) web_conf_dir=/etc/apache2 ;;
+    nginx) web_conf_dir=/etc/nginx ;;
+esac
+find "$web_conf_dir" \( -type f -o -type l \) -print 2>/dev/null | sort | while IFS= read -r path; do
     if [ -L "$path" ]; then
         echo "link $(readlink "$path") $path"
     else
