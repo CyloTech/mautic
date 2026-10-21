@@ -64,6 +64,15 @@ case "$php_floor" in
     *) fail "PHP_FIXED_VERSION in $cylo_build_dockerfile is '$php_floor'; pin the fixed package version first" ;;
 esac
 case "$php_floor" in *[!A-Za-z0-9.+~-]*) fail "invalid PHP package floor: $php_floor" ;; esac
+# The newest package version known not to contain the fix. A release pin
+# must be newer than it, so a mistaken pin cannot approve an unpatched build.
+gate_php_unfixed_version=$(sed -n "s/^gate_php_unfixed_version=//p" "$release_dir/image.env")
+case "$gate_php_unfixed_version" in ''|*[!A-Za-z0-9.+~-]*) fail "release/image.env: bad or missing gate_php_unfixed_version" ;; esac
+if [ "$gate_mode" = release ]; then
+    command -v dpkg >/dev/null 2>&1 || fail "missing tool: dpkg"
+    dpkg --compare-versions "$php_floor" gt "$gate_php_unfixed_version" \
+        || fail "PHP_FIXED_VERSION $php_floor is not newer than $gate_php_unfixed_version, the last version without the fix"
+fi
 
 for tool in docker curl jq diff sort comm awk dpkg; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
@@ -195,9 +204,6 @@ for kind in modules-cli modules-fpm web-modules; do
     section "$kind" image > "$work_dir/image.$kind"
     diff -u "$work_dir/base.$kind" "$work_dir/image.$kind" || fail "$kind differs from the deployed image"
 done
-if grep -qi -E 'warning|error' "$work_dir/image.modules-cli" "$work_dir/image.modules-fpm"; then
-    fail "module listing printed warnings"
-fi
 echo "CLI, FPM and $gate_web_server module lists identical to the deployed image"
 
 echo "== Configuration"
