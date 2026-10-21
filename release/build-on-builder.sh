@@ -24,11 +24,14 @@
 #       push, and print the pushed digest.
 set -euo pipefail
 
-builder_host=appbox@builder.grant.appboxes.co
-builder_ssh=(ssh -p 12246 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+# The dedicated builder (128 CPUs, logged in to repo.cylo.net). The older
+# builder.grant.appboxes.co:12246 is overloaded and no longer used.
+builder_host=appbox@builder1.builder.appboxes.co
+builder_ssh=(ssh -p 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=10
     -o StrictHostKeyChecking=yes)
-builder_scp=(scp -P 12246 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+builder_scp=(scp -P 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
     -o StrictHostKeyChecking=yes)
 
@@ -179,7 +182,7 @@ echo "builder directory $cylo_build_remote_dir"
 
 echo "== build $build_ref"
 "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-    { docker build --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args \
+    { docker build --no-cache --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args \
         -t '$build_ref' . > ../build.log 2>&1 \
       || { tail -n 150 ../build.log; exit 1; }; } && \
     tail -n 30 ../build.log"
@@ -196,5 +199,6 @@ echo "== gate, push"
 "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
     ./release/verify-image.sh '$build_ref' && \
     docker push '$build_ref' && \
-    docker buildx imagetools inspect '$build_ref' | head -n 3"
+    docker buildx imagetools inspect '$build_ref' | head -n 3 && \
+    echo \"pushed digest: \$(docker buildx imagetools inspect --format '{{json .Manifest}}' '$build_ref' | jq -r .digest)\""
 echo "RELEASED $build_ref from $cylo_build_commit"

@@ -218,6 +218,10 @@ section config-tests image | grep -qx "$gate_web_server exit=0" || fail "$gate_w
 echo "== Multipart upload"
 in_image_as "$image_ref" sh /release/multipart-smoke.sh "$gate_php_source" || fail "multipart upload smoke test failed"
 
+echo "== Web server: PHP page and multipart upload through $gate_web_server"
+in_image_as "$image_ref" sh /release/web-smoke.sh "$gate_php_source" "$gate_web_server" \
+    || fail "PHP page or multipart upload through $gate_web_server failed"
+
 echo "== Regression checks"
 for check in "$release_dir"/regression/*.sh; do
     [ -e "$check" ] || continue
