@@ -1,0 +1,36 @@
+# Mautic 5.2.3-1: the deployed image (repo.cylo.net/mautic:latest, Ubuntu
+# 24.04, Mautic 5.2.3, php8.3 8.3.6-0ubuntu0.24.04.3) with only Ubuntu's php8.3
+# packages upgraded to the security release.
+#
+# Apache serves PHP through mod_php (libapache2-mod-php8.3). Mautic, the
+# Appbox scripts, Apache and the PHP configuration are unchanged; existing
+# PHP configuration files are kept.
+#
+# Release: set PHP_FIXED_VERSION to the php8.3 version from the Ubuntu
+# security notice (release/build-on-builder.sh pin <version>). The build
+# fails while it is unset. A trial build passes today's noble-security
+# version instead.
+
+FROM repo.cylo.net/mautic@sha256:23b8c612ed851368d870c5b1a52aef68b4469eafe62ef84ecf7b16105146de13
+
+ARG PHP_FIXED_VERSION=unset
+
+RUN set -eu; \
+    case "$PHP_FIXED_VERSION" in \
+        [0-9]*) ;; \
+        *) echo "PHP_FIXED_VERSION is not set; pin the fixed php8.3 version" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    php_packages=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${source:Package}\n' \
+        | awk -F'|' '$1 ~ /^ii/ && $3 == "php8.3" {print $2}'); \
+    [ -n "$php_packages" ]; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $php_packages; \
+    for package in $php_packages; do \
+        installed=$(dpkg-query -W -f='${Version}' "$package"); \
+        dpkg --compare-versions "$installed" ge "$PHP_FIXED_VERSION" \
+            || { echo "$package $installed is older than $PHP_FIXED_VERSION" >&2; exit 1; }; \
+    done; \
+    php8.3 -m >/dev/null; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
