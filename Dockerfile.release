@@ -6,14 +6,14 @@
 # Appbox scripts, Apache and the PHP configuration are unchanged; existing
 # PHP configuration files are kept.
 #
-# Release: set PHP_FIXED_VERSION to the php8.3 version from the Ubuntu
-# security notice (release/build-on-builder.sh pin <version>). The build
-# fails while it is unset. A trial build passes today's noble-security
-# version instead.
+# PHP_FIXED_VERSION is the noble-security php8.3 that carries
+# CVE-2026-109618_109619.patch (PHP security release of 21 October 2026).
+# The build fails unless apt installs at least that version for every
+# php8.3 package (release/build-on-builder.sh pin <version> changes it).
 
 FROM repo.cylo.net/mautic@sha256:23b8c612ed851368d870c5b1a52aef68b4469eafe62ef84ecf7b16105146de13
 
-ARG PHP_FIXED_VERSION=unset
+ARG PHP_FIXED_VERSION=8.3.6-0ubuntu0.24.04.13
 
 RUN set -eu; \
     case "$PHP_FIXED_VERSION" in \
