@@ -31,7 +31,7 @@ echo " "
     a2enmod remoteip
 
     echo "Installing Mautic"
-    /bin/bash /scripts/mautic.sh
+    /bin/bash /scripts/mautic.sh || exit 1
 
     # Clean Up
     echo "Cleaning up"

@@ -1,5 +1,4 @@
 #!/bin/bash
-set -x
 
 echo "Creating directories"
 mkdir -p /home/appbox/logs/apache
@@ -54,11 +53,18 @@ if [ -z "$MAUTIC_DB_HOST" ]; then
 fi
 
 
-if [ -z "$MAUTIC_DB_PASSWORD" ]; then
-        echo >&2 "error: missing required MAUTIC_DB_PASSWORD environment variable"
-        echo >&2 "  Did you forget to -e MAUTIC_DB_PASSWORD=... ?"
-        echo >&2
-        echo >&2 "  (Also of interest might be MAUTIC_DB_USER and MAUTIC_DB_NAME.)"
+# A new install connects with the per-install root password that
+# /scripts/mysql.sh stored. It reaches the installer through the environment
+# and the config file, never through a command line. An existing install keeps
+# the database settings in its config/local.php.
+if ! [ -e mautic_installed ] && [ -z "$MAUTIC_DB_PASSWORD" ] && [ "$MAUTIC_DB_USER" = 'root' ] \
+        && [ -f /home/appbox/config/mysql/client.cnf ]; then
+        MAUTIC_DB_PASSWORD=$(sed -n 's/^password="\(.*\)"$/\1/p' /home/appbox/config/mysql/client.cnf | head -n 1)
+        export MAUTIC_DB_PASSWORD
+fi
+
+if ! [ -e mautic_installed ] && [ -z "$MAUTIC_DB_PASSWORD" ]; then
+        echo >&2 "error: no database password for the new install"
         exit 1
 fi
 
@@ -137,7 +143,6 @@ echo >&2 "The following information will be prefilled into the installer (keep p
 echo >&2 "Host Name: $MAUTIC_DB_HOST"
 echo >&2 "Database Name: $MAUTIC_DB_NAME"
 echo >&2 "Database Username: $MAUTIC_DB_USER"
-echo >&2 "Database Password: $MAUTIC_DB_PASSWORD"
 
 # Write the database connection to the config so the installer prefills it
 if [ ! -f /home/appbox/public_html/config/local.php ]; then
@@ -185,7 +190,7 @@ if ! [ -e mautic_installed ]; then
         # Warm up the cache
         su -c "php bin/console cache:warmup --env=prod" -s /bin/bash appbox
 
-        su -c "php bin/console mautic:install -n -f --db_driver=pdo_mysql --db_host=$MAUTIC_DB_HOST --db_port=3306 --db_name=$MAUTIC_DB_NAME --db_user=$MAUTIC_DB_USER --db_password=$MAUTIC_DB_PASSWORD --admin_firstname=$FIRSTNAME --admin_lastname=$LASTNAME --admin_username=$USERNAME --admin_email=$EMAIL --admin_password=$PASSWORD https://$HOSTNAME 0" -s /bin/bash appbox
+        su -c "php bin/console mautic:install -n -f --db_driver=pdo_mysql --db_host=$MAUTIC_DB_HOST --db_port=3306 --db_name=$MAUTIC_DB_NAME --db_user=$MAUTIC_DB_USER --admin_firstname=$FIRSTNAME --admin_lastname=$LASTNAME --admin_username=$USERNAME --admin_email=$EMAIL --admin_password=$PASSWORD https://$HOSTNAME 0" -s /bin/bash appbox
 fi
 
 echo "Killing MySQL"
