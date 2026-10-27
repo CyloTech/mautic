@@ -59,7 +59,7 @@ chown -R appbox:appbox /var/run/mysqld
 echo "Start MySQL in safe mode"
 /usr/bin/mysqld_safe --defaults-file="$mysql_config" &
 sleep 10
-for _ in $(seq 1 60); do
+for _ in $(seq 1 150); do
     mysqladmin --no-defaults --socket="$mysql_socket" ping >/dev/null 2>&1 && break
     sleep 2
 done
@@ -124,7 +124,9 @@ else
     done
     client_credentials=
     if [ -n "$mautic_local_config" ]; then
-        client_credentials=$(runuser -u appbox -- php -r '
+        # PHP prints start-up warnings on stdout in this image; keep them off
+        # it and take only what follows the marker.
+        client_credentials=$(runuser -u appbox -- php -d display_errors=stderr -d display_startup_errors=0 -r '
             $parameters = [];
             include $argv[1];
             $user = $parameters["db_user"] ?? "";
@@ -133,8 +135,12 @@ else
                 || preg_match("/[\\x00-\\x1f\\x7f\"\\\\]/", $user . $password)) {
                 exit(1);
             }
-            echo $user, "\n", $password;
+            echo "APPBOX-DB-LOGIN\n", $user, "\n", $password;
         ' -- "$mautic_local_config" 2>/dev/null) || client_credentials=
+        case "$client_credentials" in
+            *APPBOX-DB-LOGIN$'\n'*$'\n'*) client_credentials=${client_credentials##*APPBOX-DB-LOGIN$'\n'} ;;
+            *) client_credentials= ;;
+        esac
     fi
     if [ -n "$client_credentials" ]; then
         client_user=${client_credentials%%$'\n'*}
