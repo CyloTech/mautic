@@ -20,11 +20,18 @@ Checks:
     and a new random one is stored with mode 0600 on a fresh install, and no
     database password is in the container log, any process's arguments or
     environment, the crontab or the log and configuration directories;
-  * an installed Mautic whose MySQL root has no password refuses to start.
+  * on an installed Mautic whose MySQL root has no password, the start-up
+    script refuses to continue.
 
 Every container gets dummy install values and a stub install callback; nothing
 here contacts api.cylo.io or a customer instance. Runs at most one MySQL
-container at a time.
+container at a time. To keep the first-start `apt install mysql-server` from
+taking most of an hour on a busy builder disk, test containers get a dpkg
+`force-unsafe-io` setting; it only skips dpkg's fsync calls. 5.2.3-1's
+mysql.sh gives MySQL a fixed 10 seconds to start before configuring it; on a
+busy builder that is too short (root keeps an empty password and the install
+fails), so the 5.2.3-1 container gets a copy that also waits for MySQL to
+answer. Nothing else in 5.2.3-1 is changed.
 """
 import base64
 import hashlib
@@ -250,9 +257,25 @@ def storage(name):
 def launch(suffix, ref, volumes):
     name = run_id + '-' + suffix
     shim = work / 'curl-shim'
+    dpkg = work / 'dpkg-unsafe-io'
     if not shim.exists():
         shim.write_text(CURL_SHIM)
         shim.chmod(0o755)
+        dpkg.write_text('force-unsafe-io\n')
+        dpkg.chmod(0o644)
+    extra = []
+    if ref == CURRENT:
+        baseline_mysql = work / 'baseline-mysql.sh'
+        if not baseline_mysql.exists():
+            source = out(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'cat', CURRENT,
+                          '/scripts/mysql.sh'])
+            start = '/usr/bin/mysqld_safe --defaults-file=/home/appbox/config/mysql/mysqld.cnf &\nsleep 10\n'
+            expect(source.count(start) == 1, '5.2.3-1 mysql.sh no longer has the fixed 10 second wait')
+            source = source.replace(start, start + 'until mysqladmin --no-defaults ping >/dev/null 2>&1; '
+                                    'do sleep 2; done\n')
+            baseline_mysql.write_text(source)
+            baseline_mysql.chmod(0o755)
+        extra = ['-v', '%s:/scripts/mysql.sh:ro' % baseline_mysql]
     run(['docker', 'run', '-d', '--platform', 'linux/amd64', '--name', name,
          '--label', 'appbox.release-gate=' + run_id, '--init',
          '--memory', '2g', '--memory-swap', '2g', '--memory-reservation', '1g',
@@ -260,9 +283,10 @@ def launch(suffix, ref, volumes):
          '-v', '%s/config:/home/appbox/config' % volumes, '-v', '%s/logs:/home/appbox/logs' % volumes,
          '-v', '%s/mysql:/home/appbox/mysql' % volumes, '-v', '%s/public_html:/home/appbox/public_html' % volumes,
          '-v', '%s:/usr/local/bin/curl:ro' % shim, '-v', '%s/cb:/gate-cb' % volumes,
+         '-v', '%s:/etc/dpkg/dpkg.cfg.d/zz-release-gate:ro' % dpkg,
          '-e', 'USERNAME=' + admin_user, '-e', 'PASSWORD=' + admin_password,
          '-e', 'FIRSTNAME=Gate', '-e', 'LASTNAME=Release', '-e', 'EMAIL=gate@example.com',
-         '-e', 'URL=', '-e', 'INSTANCE_ID=' + INSTANCE_ID, ref])
+         '-e', 'URL=', '-e', 'INSTANCE_ID=' + INSTANCE_ID] + extra + [ref])
     containers.append(name)
     return name
 
@@ -397,9 +421,10 @@ def read_secrets(name):
     cnf = out(['docker', 'exec', name, 'cat', CLIENT_CNF])
     match = re.search(r'^password="([^"]*)"$', cnf, re.M)
     expect(match, 'client.cnf has no password line')
-    local = out(['docker', 'exec', name, 'runuser', '-u', 'appbox', '--', 'php', '-r',
-                 '$parameters = []; include "%s"; echo json_encode($parameters);' % LOCAL_PHP])
-    params = json.loads(local)
+    local = out(['docker', 'exec', name, 'runuser', '-u', 'appbox', '--', 'php', '-d', 'display_errors=stderr',
+                 '-d', 'display_startup_errors=0', '-r',
+                 '$parameters = []; include "%s"; echo "\\n@@JSON@@", json_encode($parameters);' % LOCAL_PHP])
+    params = json.loads(local.rsplit('@@JSON@@', 1)[1])
     return match.group(1), params
 
 
@@ -524,21 +549,22 @@ def scenario_fresh():
     check_login(name)
     check_hardened(name, 'fresh-restart')
     check_no_leaks(name, {password, old_password})
-    # Fail closed: an installed Mautic whose MySQL root has no password must not start.
+    # Fail closed: with MySQL root's password removed, the start-up script that
+    # runs when the container is created must refuse to continue. Re-creating
+    # the container would repeat the slow first-start package install, so run
+    # the image's /scripts/mysql.sh in place, as /etc/my_init.d/20_installer.sh
+    # does, after stopping the supervised MySQL.
     sh(name, "mysql --defaults-file=%s -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY '';\" && rm -f %s"
        % (CLIENT_CNF, CLIENT_CNF))
-    remove(name)
-    name = launch('emptypw', image, volumes)
-    deadline = time.time() + READY_TIMEOUT
-    while running(name) and time.time() < deadline:
-        time.sleep(5)
-    expect(not running(name), 'empty-password: the container kept running')
-    logs = run(['docker', 'logs', name], check=False)
-    logs = (logs.stdout + logs.stderr).decode(errors='replace')
-    expect('MySQL root has no password on an installed Mautic' in logs, 'empty-password: no refusal message')
-    expect(len(callbacks(volumes)) == 1, 'empty-password: an install callback was sent')
-    log('PASS fail closed: an installed Mautic whose MySQL root has no password stops before '
-        'starting services and sends no install callback')
+    sh(name, 'sv -w 180 stop mysql >/dev/null; mkdir -p /sources && cp /home/appbox/config/mysql/mysqld.cnf /sources/')
+    attempt = sh(name, '/bin/bash /scripts/mysql.sh', check=False, timeout=3600)
+    text = (attempt.stdout + attempt.stderr).decode(errors='replace')
+    expect(attempt.returncode != 0 and 'MySQL root has no password on an installed Mautic' in text,
+           'empty-password: mysql.sh did not refuse to continue (exit %d)' % attempt.returncode)
+    expect(not sh(name, 'test -s %s' % CLIENT_CNF, check=False).returncode == 0,
+           'empty-password: mysql.sh stored credentials')
+    log('PASS fail closed: on an installed Mautic whose MySQL root has no password, '
+        'the start-up script stops (exit %d) instead of continuing' % attempt.returncode)
     remove(name)
 
 

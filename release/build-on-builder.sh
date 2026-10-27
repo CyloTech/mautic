@@ -172,12 +172,18 @@ grep -E '^ARG (PHP_VERSION|PHP_IMAGE|PHP_FIXED_VERSION)=' "$cylo_build_dockerfil
 stage_root=${CYLO_BUILD_TMP:-/private/tmp}
 cylo_build_stage=$(mktemp -d "$stage_root/cylo-app-build.XXXXXX")
 cylo_build_remote_dir=
+detached_job=false
 cleanup() {
     case "$cylo_build_stage" in
         "$stage_root"/cylo-app-build.??????) rm -rf "$cylo_build_stage" ;;
     esac
     case "$cylo_build_remote_dir" in
         "/home/appbox/builds/$cylo_build_repo_slug.$remote_suffix".[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]])
+            # Never delete the directory under a detached job that is still running.
+            if [ "$detached_job" = true ] && ! "${builder_ssh[@]}" "$builder_host" "test -f '$cylo_build_remote_dir/job.exit'"; then
+                echo "WARNING: the job in $cylo_build_remote_dir may still be running; see job.log there and remove the directory when it ends" >&2
+                return
+            fi
             "${builder_ssh[@]}" "$builder_host" "rm -rf '$cylo_build_remote_dir'" \
                 || echo "WARNING: remove $cylo_build_remote_dir on the builder by hand" >&2
             ;;
@@ -205,25 +211,51 @@ echo "builder directory $cylo_build_remote_dir"
     printf '%s  context.tgz\n' '$cylo_build_sha' | sha256sum -c - && \
     mkdir context && tar xzf context.tgz -C context"
 
-echo "== build $build_ref"
-"${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-    { docker build --no-cache --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args \
-        -t '$build_ref' . > ../build.log 2>&1 \
-      || { tail -n 150 ../build.log; exit 1; }; } && \
-    tail -n 30 ../build.log"
-
-if [ "$mode" = trial ]; then
-    echo "== gate (trial, no push)"
-    "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-        env $gate_env './$cylo_build_gate' '$build_ref'"
-    echo "TRIAL PASSED: $build_ref from $cylo_build_commit (not pushed)"
-    exit 0
-fi
-
-echo "== gate, push"
-"${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-    './$cylo_build_gate' '$build_ref' && \
-    docker push '$build_ref' && \
-    docker buildx imagetools inspect '$build_ref' | head -n 3 && \
-    echo \"pushed digest: \$(docker buildx imagetools inspect --format '{{json .Manifest}}' '$build_ref' | jq -r .digest)\""
-echo "RELEASED $build_ref from $cylo_build_commit"
+# Build, gate and (for a release) push run as one detached job on the builder,
+# joined with &&, so a dropped SSH session cannot interrupt a long gate and any
+# failure prevents publication. This script follows job.log until job.exit
+# appears.
+cylo_build_job="$cylo_build_stage/job.sh"
+{
+    echo '#!/bin/bash'
+    echo 'set -o pipefail'
+    echo 'cd "$(dirname "$0")/context" || exit 1'
+    echo "echo '== build $build_ref'"
+    echo "docker build --no-cache --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args -t '$build_ref' . > ../build.log 2>&1 || { tail -n 150 ../build.log; exit 1; }"
+    echo "tail -n 30 ../build.log"
+    if [ "$mode" = trial ]; then
+        echo "echo '== gate (trial, no push)'"
+        echo "env $gate_env './$cylo_build_gate' '$build_ref' || exit 1"
+        echo "echo 'TRIAL PASSED: $build_ref from $cylo_build_commit (not pushed)'"
+    else
+        echo "echo '== gate, push'"
+        echo "'./$cylo_build_gate' '$build_ref' || exit 1"
+        echo "docker push '$build_ref' || exit 1"
+        echo "docker buildx imagetools inspect '$build_ref' | head -n 3"
+        echo "echo \"pushed digest: \$(docker buildx imagetools inspect --format '{{json .Manifest}}' '$build_ref' | jq -r .digest)\""
+        echo "echo 'RELEASED $build_ref from $cylo_build_commit'"
+    fi
+} > "$cylo_build_job"
+"${builder_scp[@]}" "$cylo_build_job" "$builder_host:$cylo_build_remote_dir/job.sh"
+detached_job=true
+"${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir' && \
+    setsid nohup bash -c 'bash ./job.sh; echo \$? > job.exit.tmp; mv job.exit.tmp job.exit' > job.log 2>&1 < /dev/null &"
+echo "== job started in $cylo_build_remote_dir (job.log)"
+shown=0
+while :; do
+    sleep 60
+    if lines=$("${builder_ssh[@]}" "$builder_host" "tail -n +$((shown + 1)) '$cylo_build_remote_dir/job.log'"); then
+        if [ -n "$lines" ]; then
+            printf '%s\n' "$lines"
+            shown=$((shown + $(printf '%s\n' "$lines" | wc -l)))
+        fi
+    fi
+    if job_exit=$("${builder_ssh[@]}" "$builder_host" "cat '$cylo_build_remote_dir/job.exit' 2>/dev/null"); then
+        case "$job_exit" in
+            '') ;;
+            0) "${builder_ssh[@]}" "$builder_host" "tail -n +$((shown + 1)) '$cylo_build_remote_dir/job.log'"; exit 0 ;;
+            *) "${builder_ssh[@]}" "$builder_host" "tail -n +$((shown + 1)) '$cylo_build_remote_dir/job.log'"
+               die "the job failed (exit $job_exit); nothing was pushed" ;;
+        esac
+    fi
+done
