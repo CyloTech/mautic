@@ -1,33 +1,33 @@
-# Releasing mautic 5.2.3-1
+# Releasing mautic 5.2.3-2
 
-The image is the deployed mautic:latest digest with Ubuntu's php8.3 packages
-upgraded in place (see Dockerfile.release).
+The image is the released 5.2.3-1 image with four start-up files replaced and
+the database password variables removed (see Dockerfile.release):
 
-## 1. Is the patched PHP available?
+- MySQL listens on 127.0.0.1 only (`sources/mysqld.cnf` and the service
+  command line), and the start-up script drops `root@'%'`.
+- A new install gets a random root password, stored in
+  `/home/appbox/config/mysql/client.cnf` (mode 0600) and in Mautic's
+  `config/local.php`. An existing install keeps its password, which the
+  start-up script reads from `config/local.php`.
+- No password is passed on a command line, written to the crontab (the backup
+  job uses `--defaults-file`) or printed to the container log.
+- An installed Mautic whose MySQL root has no password refuses to start.
 
-Ubuntu must have published a php8.3 for noble-security that carries the
-fix for the multipart/form-data vulnerabilities announced on 21 October
-2026. `8.3.6-0ubuntu0.24.04.13` (published 2026-10-21 13:41 UTC, patch
-`CVE-2026-109618_109619.patch`, touches `main/rfc1867.c`) is that release.
+The start-up scripts run once per container, so an existing install picks up
+the change when it is updated (re-created) to 5.2.3-2.
 
-    curl -s -G https://api.launchpad.net/1.0/ubuntu/+archive/primary \
-      --data-urlencode ws.op=getPublishedSources --data-urlencode source_name=php8.3 \
-      --data-urlencode distro_series=https://api.launchpad.net/1.0/ubuntu/noble \
-      --data-urlencode pocket=Security --data-urlencode status=Published \
-      --data-urlencode exact_match=true | jq -r '.entries[].source_package_version'
+## Build, gate, push
 
-## 2-5. Pin, build, gate, push
+From a clean checkout of branch `php-multipart-fix` on the Mac, after pushing:
 
-From a clean checkout of branch `php-multipart-fix` on the Mac:
+    release/build-on-builder.sh trial      # build and gate, never pushes
+    release/build-on-builder.sh release    # build, gate, push, print digest
 
-    git pull --ff-only origin php-multipart-fix
-    release/build-on-builder.sh pin 8.3.6-0ubuntu0.24.04.13
-    git commit -am "Require php8.3 8.3.6-0ubuntu0.24.04.13"
-    git push origin php-multipart-fix
-    release/build-on-builder.sh release
+`release/release-gate.py` is the gate. It compares every file and setting
+with 5.2.3-1, installs 5.2.3-1 as a negative control, upgrades that install to
+the new image, restarts it, installs the new image fresh, restarts that, and
+checks that an installed Mautic with a passwordless MySQL root does not start.
+It pushes nothing; the build script pushes only after it passes and the
+registry reports the tag absent.
 
-`release` builds `repo.cylo.net/mautic:5.2.3-1` on the builder from the
-pushed commit, runs `release/verify-image.sh` and pushes only if the gate
-passes, then prints the pushed digest.
-
-A trial (never pushed) is `release/build-on-builder.sh trial <version>`.
+The 5.2.3-1 release (PHP security update) used `release/verify-image.sh`.

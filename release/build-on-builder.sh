@@ -19,21 +19,18 @@
 #       Build local/<image>-trial:<tag> with PHP_FIXED_VERSION=<version>,
 #       gate it against the real release tag. Never pushes.
 #
+# For cylo_build_kind=patch (files replaced in the released image, no pin):
+#   build-on-builder.sh trial
+#       Build local/<image>-trial:<tag> and gate it against the real release
+#       tag. Never pushes.
+#
 #   build-on-builder.sh release
 #       Build the release reference from the committed pins, run the gate,
 #       push, and print the pushed digest.
+#
+# The gate is cylo_build_gate in release/image.env (default
+# release/verify-image.sh). It takes the image reference as its only argument.
 set -euo pipefail
-
-# The dedicated builder (128 CPUs, logged in to repo.cylo.net). The older
-# builder.grant.appboxes.co:12246 is overloaded and no longer used.
-builder_host=appbox@builder1.builder.appboxes.co
-builder_ssh=(ssh -p 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
-    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
-    -o ServerAliveInterval=30 -o ServerAliveCountMax=10
-    -o StrictHostKeyChecking=yes)
-builder_scp=(scp -P 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
-    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
-    -o StrictHostKeyChecking=yes)
 
 die() {
     echo "ERROR: $*" >&2
@@ -62,7 +59,27 @@ case "$cylo_build_tag" in *[!A-Za-z0-9._-]*) die "bad tag" ;; esac
 [ "$cylo_build_release_ref" = "repo.cylo.net/$cylo_build_image:$cylo_build_tag" ] || die "bad release ref"
 case "$cylo_build_dockerfile" in /*|*..*|*[!A-Za-z0-9._/-]*) die "bad Dockerfile path" ;; esac
 test -f "$cylo_build_dockerfile" || die "$cylo_build_dockerfile is missing"
-test -x release/verify-image.sh || die "release/verify-image.sh is not executable"
+cylo_build_gate=$(sed -n "s/^cylo_build_gate=//p" release/image.env)
+cylo_build_gate=${cylo_build_gate:-release/verify-image.sh}
+case "$cylo_build_gate" in /*|*..*|*[!A-Za-z0-9._/-]*) die "bad gate path" ;; esac
+test -x "$cylo_build_gate" || die "$cylo_build_gate is not executable"
+
+# The dedicated builder, logged in to repo.cylo.net. release/image.env may name
+# another one (builder1.builder.appboxes.co:10112 by default).
+builder_host=$(sed -n "s/^cylo_build_builder=//p" release/image.env)
+builder_host=${builder_host:-appbox@builder1.builder.appboxes.co}
+builder_port=$(sed -n "s/^cylo_build_builder_port=//p" release/image.env)
+builder_port=${builder_port:-10112}
+case "$builder_host" in appbox@*.appboxes.co) ;; *) die "bad builder" ;; esac
+case "$builder_host" in *[!A-Za-z0-9.@-]*) die "bad builder" ;; esac
+case "$builder_port" in ''|*[!0-9]*) die "bad builder port" ;; esac
+builder_ssh=(ssh -p "$builder_port" -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=10
+    -o StrictHostKeyChecking=yes)
+builder_scp=(scp -P "$builder_port" -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+    -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
+    -o StrictHostKeyChecking=yes)
 
 dockerfile_arg() {
     sed -n "s/^ARG $1=//p" "$cylo_build_dockerfile"
@@ -119,6 +136,14 @@ case "$cylo_build_kind:$mode" in
         gate_env="GATE_TRIAL_PHP_MIN_VERSION=$fixed_version"
         build_ref="local/$cylo_build_image-trial:$cylo_build_tag"
         remote_suffix="$cylo_build_tag-trial"
+        ;;
+    patch:trial)
+        build_ref="local/$cylo_build_image-trial:$cylo_build_tag"
+        remote_suffix="$cylo_build_tag-trial"
+        ;;
+    patch:release)
+        build_ref=$cylo_build_release_ref
+        remote_suffix=$cylo_build_tag
         ;;
     official-php:release)
         [[ "$(dockerfile_arg PHP_IMAGE)" =~ ^php:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]] \
@@ -190,14 +215,14 @@ echo "== build $build_ref"
 if [ "$mode" = trial ]; then
     echo "== gate (trial, no push)"
     "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-        env $gate_env ./release/verify-image.sh '$build_ref'"
+        env $gate_env './$cylo_build_gate' '$build_ref'"
     echo "TRIAL PASSED: $build_ref from $cylo_build_commit (not pushed)"
     exit 0
 fi
 
 echo "== gate, push"
 "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-    ./release/verify-image.sh '$build_ref' && \
+    './$cylo_build_gate' '$build_ref' && \
     docker push '$build_ref' && \
     docker buildx imagetools inspect '$build_ref' | head -n 3 && \
     echo \"pushed digest: \$(docker buildx imagetools inspect --format '{{json .Manifest}}' '$build_ref' | jq -r .digest)\""
