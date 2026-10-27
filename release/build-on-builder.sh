@@ -238,8 +238,10 @@ cylo_build_job="$cylo_build_stage/job.sh"
 } > "$cylo_build_job"
 "${builder_scp[@]}" "$cylo_build_job" "$builder_host:$cylo_build_remote_dir/job.sh"
 detached_job=true
-"${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir' && \
-    setsid nohup bash -c 'bash ./job.sh; echo \$? > job.exit.tmp; mv job.exit.tmp job.exit' > job.log 2>&1 < /dev/null &"
+# Only the setsid command goes to the background, with every descriptor
+# redirected, so this SSH session returns at once.
+"${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir' || exit 1; \
+    setsid nohup bash -c 'bash ./job.sh; echo \$? > job.exit.tmp; mv job.exit.tmp job.exit' > job.log 2>&1 < /dev/null & exit 0"
 echo "== job started in $cylo_build_remote_dir (job.log)"
 shown=0
 while :; do
