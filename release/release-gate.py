@@ -377,10 +377,16 @@ def login(name, password):
         '_username': admin_user, '_password': password, '_csrf_token': token.group(1)})
     expect(status in (301, 302, 303), 'login returned HTTP %s' % status)
     path = urllib.parse.urlsplit(location).path
-    if path.endswith('/s/login'):
-        return False
-    status, location, body = web(name, 'GET', '/s/dashboard', cookies=cookies)
-    return status == 200 and 'login_check' not in body
+    # The first login of a new admin redirects the dashboard to itself once
+    # while Mautic creates the default widgets.
+    for _ in range(5):
+        if path.endswith('/s/login'):
+            return False
+        status, location, body = web(name, 'GET', path, cookies=cookies)
+        if status not in (301, 302, 303):
+            return status == 200 and path == '/s/dashboard' and 'login_check' not in body
+        path = urllib.parse.urlsplit(location).path
+    return False
 
 
 def check_login(name):
@@ -461,9 +467,11 @@ def check_hardened(name, label):
     expect('root@localhost' in users and not any(u.startswith('root@') and u != 'root@localhost' for u in users),
            '%s: root accounts are %s' % (label, sorted(u for u in users if u.startswith('root@'))))
     expect(not any(u.endswith('@%') for u in users), '%s: accounts with remote login: %s' % (label, sorted(users)))
-    refused = run(['docker', 'exec', name, 'mysql', '--no-defaults', '--protocol=socket', '-uroot', '--skip-password',
+    refused = run(['docker', 'exec', name, 'mysql', '--no-defaults', '--protocol=socket',
+                   '--socket=/run/mysqld/mysqld.sock', '-uroot', '--skip-password',
                    '-e', 'SELECT 1'], check=False)
-    expect(refused.returncode != 0, '%s: MySQL root accepts an empty password' % label)
+    expect(refused.returncode != 0 and b'Access denied' in refused.stderr,
+           '%s: MySQL root accepts an empty password' % label)
     tcp = out(['docker', 'exec', name, 'mysql', '--defaults-file=' + CLIENT_CNF, '--protocol=tcp',
                '-h', '127.0.0.1', '-N', '-e', 'SELECT CURRENT_USER()']).strip()
     expect(tcp == 'root@localhost', '%s: TCP login over 127.0.0.1 maps to %s' % (label, tcp))
